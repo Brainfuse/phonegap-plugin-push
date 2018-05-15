@@ -29,6 +29,8 @@
 #import "PushPlugin.h"
 #import "GoogleCloudMessaging.h"
 #import "GGLInstanceIDHeaders.h"
+@import UserNotifications;
+#import <Foundation/Foundation.h>
 
 @implementation PushPlugin : CDVPlugin
 
@@ -49,6 +51,8 @@
 @synthesize gcmRegistrationHandler;
 @synthesize gcmRegistrationToken;
 @synthesize gcmTopics;
+
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
 
 -(void)initGCMRegistrationHandler;
 {
@@ -423,62 +427,101 @@
 
     // Check what Notifications the user has turned on.  We registered for all three, but they may have manually disabled some or all of them.
 #define SYSTEM_VERSION_LESS_THAN(v) ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] == NSOrderedAscending)
+    if(SYSTEM_VERSION_LESS_THAN(@"10.0")){
+        
+        NSUInteger rntypes;
+        if (!SYSTEM_VERSION_LESS_THAN(@"8.0")) {
+            rntypes = [[[UIApplication sharedApplication] currentUserNotificationSettings] types];
+        } else {
+            rntypes = [[UIApplication sharedApplication] enabledRemoteNotificationTypes];
+        }
 
-    NSUInteger rntypes;
-    if (!SYSTEM_VERSION_LESS_THAN(@"8.0")) {
-        rntypes = [[[UIApplication sharedApplication] currentUserNotificationSettings] types];
-    } else {
-        rntypes = [[UIApplication sharedApplication] enabledRemoteNotificationTypes];
-    }
+        // Set the defaults to disabled unless we find otherwise...
+        NSString *pushBadge = @"disabled";
+        NSString *pushAlert = @"disabled";
+        NSString *pushSound = @"disabled";
 
-    // Set the defaults to disabled unless we find otherwise...
-    NSString *pushBadge = @"disabled";
-    NSString *pushAlert = @"disabled";
-    NSString *pushSound = @"disabled";
+        // Check what Registered Types are turned on. This is a bit tricky since if two are enabled, and one is off, it will return a number 2... not telling you which
+        // one is actually disabled. So we are literally checking to see if rnTypes matches what is turned on, instead of by number. The "tricky" part is that the
+        // single notification types will only match if they are the ONLY one enabled.  Likewise, when we are checking for a pair of notifications, it will only be
+        // true if those two notifications are on.  This is why the code is written this way
+        if(rntypes & UIRemoteNotificationTypeBadge){
+            pushBadge = @"enabled";
+        }
+        if(rntypes & UIRemoteNotificationTypeAlert) {
+            pushAlert = @"enabled";
+        }
+        if(rntypes & UIRemoteNotificationTypeSound) {
+            pushSound = @"enabled";
+        }
 
-    // Check what Registered Types are turned on. This is a bit tricky since if two are enabled, and one is off, it will return a number 2... not telling you which
-    // one is actually disabled. So we are literally checking to see if rnTypes matches what is turned on, instead of by number. The "tricky" part is that the
-    // single notification types will only match if they are the ONLY one enabled.  Likewise, when we are checking for a pair of notifications, it will only be
-    // true if those two notifications are on.  This is why the code is written this way
-    if(rntypes & UIRemoteNotificationTypeBadge){
-        pushBadge = @"enabled";
-    }
-    if(rntypes & UIRemoteNotificationTypeAlert) {
-        pushAlert = @"enabled";
-    }
-    if(rntypes & UIRemoteNotificationTypeSound) {
-        pushSound = @"enabled";
-    }
+        [results setValue:pushBadge forKey:@"pushBadge"];
+        [results setValue:pushAlert forKey:@"pushAlert"];
+        [results setValue:pushSound forKey:@"pushSound"];
 
-    [results setValue:pushBadge forKey:@"pushBadge"];
-    [results setValue:pushAlert forKey:@"pushAlert"];
-    [results setValue:pushSound forKey:@"pushSound"];
+        // Get the users Device Model, Display Name, Token & Version Number
+        UIDevice *dev = [UIDevice currentDevice];
+        [results setValue:dev.name forKey:@"deviceName"];
+        [results setValue:dev.model forKey:@"deviceModel"];
+        [results setValue:dev.systemVersion forKey:@"deviceSystemVersion"];
 
-    // Get the users Device Model, Display Name, Token & Version Number
-    UIDevice *dev = [UIDevice currentDevice];
-    [results setValue:dev.name forKey:@"deviceName"];
-    [results setValue:dev.model forKey:@"deviceModel"];
-    [results setValue:dev.systemVersion forKey:@"deviceSystemVersion"];
+        if([self usesGCM]) {
+            GGLInstanceIDConfig *instanceIDConfig = [GGLInstanceIDConfig defaultConfig];
+            instanceIDConfig.delegate = self;
+            [[GGLInstanceID sharedInstance] startWithConfig:instanceIDConfig];
 
-    if([self usesGCM]) {
-        GGLInstanceIDConfig *instanceIDConfig = [GGLInstanceIDConfig defaultConfig];
-        instanceIDConfig.delegate = self;
-        [[GGLInstanceID sharedInstance] startWithConfig:instanceIDConfig];
+            [self setGcmRegistrationOptions: @{kGGLInstanceIDRegisterAPNSOption:deviceToken,
+                                               kGGLInstanceIDAPNSServerTypeSandboxOption:[self gcmSandbox]}];
 
-        [self setGcmRegistrationOptions: @{kGGLInstanceIDRegisterAPNSOption:deviceToken,
-                                           kGGLInstanceIDAPNSServerTypeSandboxOption:[self gcmSandbox]}];
+            [[GGLInstanceID sharedInstance] tokenWithAuthorizedEntity:[self gcmSenderId]
+                                                                scope:kGGLInstanceIDScopeGCM
+                                                              options:[self gcmRegistrationOptions]
+                                                              handler:[self gcmRegistrationHandler]];
 
-        [[GGLInstanceID sharedInstance] tokenWithAuthorizedEntity:[self gcmSenderId]
-                                                            scope:kGGLInstanceIDScopeGCM
-                                                          options:[self gcmRegistrationOptions]
-                                                          handler:[self gcmRegistrationHandler]];
+            GCMConfig *gcmConfig = [GCMConfig defaultConfig];
+            gcmConfig.receiverDelegate = self;
+            [[GCMService sharedInstance] startWithConfig:gcmConfig];
 
-        GCMConfig *gcmConfig = [GCMConfig defaultConfig];
-        gcmConfig.receiverDelegate = self;
-        [[GCMService sharedInstance] startWithConfig:gcmConfig];
-
-    } else {
-        [self registerWithToken: token];
+        } else {
+            [self registerWithToken: token];
+        }
+    }else{
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        __weak PushPlugin *weakSelf = self;
+        [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings * _Nonnull settings) {
+            
+            // Set the defaults to disabled unless we find otherwise...
+            NSString *pushBadge = @"disabled";
+            NSString *pushAlert = @"disabled";
+            NSString *pushSound = @"disabled";
+            
+            // Check what Registered Types are turned on. This is a bit tricky since if two are enabled, and one is off, it will return a number 2... not telling you which
+            // one is actually disabled. So we are literally checking to see if rnTypes matches what is turned on, instead of by number. The "tricky" part is that the
+            // single notification types will only match if they are the ONLY one enabled.  Likewise, when we are checking for a pair of notifications, it will only be
+            // true if those two notifications are on.  This is why the code is written this way
+            if(settings.authorizationStatus & UNAuthorizationOptionBadge){
+                pushBadge = @"enabled";
+            }
+            if(settings.authorizationStatus & UNAuthorizationOptionAlert) {
+                pushAlert = @"enabled";
+            }
+            if(settings.authorizationStatus & UNAuthorizationOptionSound) {
+                pushSound = @"enabled";
+            }
+            
+            [results setValue:pushBadge forKey:@"pushBadge"];
+            [results setValue:pushAlert forKey:@"pushAlert"];
+            [results setValue:pushSound forKey:@"pushSound"];
+            
+            // Get the users Device Model, Display Name, Token & Version Number
+            UIDevice *dev = [UIDevice currentDevice];
+            [results setValue:dev.name forKey:@"deviceName"];
+            [results setValue:dev.model forKey:@"deviceModel"];
+            [results setValue:dev.systemVersion forKey:@"deviceSystemVersion"];
+    
+            [weakSelf registerWithToken: token];
+            
+        }];
     }
 #endif
 }
@@ -598,16 +641,30 @@
 
 - (void)hasPermission:(CDVInvokedUrlCommand *)command
 {
-    BOOL enabled = NO;
-    id<UIApplicationDelegate> appDelegate = [UIApplication sharedApplication].delegate;
-    if ([appDelegate respondsToSelector:@selector(userHasRemoteNotificationsEnabled)]) {
-        enabled = [appDelegate performSelector:@selector(userHasRemoteNotificationsEnabled)];
+    
+    if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"10.0")) {
+        id<UIApplicationDelegate> appDelegate = [UIApplication sharedApplication].delegate;
+        if ([appDelegate respondsToSelector:@selector(checkUserHasRemoteNotificationsEnabledWithCompletionHandler:)]) {
+            [appDelegate performSelector:@selector(checkUserHasRemoteNotificationsEnabledWithCompletionHandler:) withObject:^(BOOL isEnabled) {
+                NSMutableDictionary* message = [NSMutableDictionary dictionaryWithCapacity:1];
+                [message setObject:[NSNumber numberWithBool:isEnabled] forKey:@"isEnabled"];
+                CDVPluginResult *commandResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:message];
+                [self.commandDelegate sendPluginResult:commandResult callbackId:command.callbackId];
+            }];
+        }
+    }else{
+        BOOL enabled = NO;
+        id<UIApplicationDelegate> appDelegate = [UIApplication sharedApplication].delegate;
+        if ([appDelegate respondsToSelector:@selector(userHasRemoteNotificationsEnabled)]) {
+            enabled = [appDelegate performSelector:@selector(userHasRemoteNotificationsEnabled)];
+        }
+        
+        NSMutableDictionary* message = [NSMutableDictionary dictionaryWithCapacity:1];
+        [message setObject:[NSNumber numberWithBool:enabled] forKey:@"isEnabled"];
+        CDVPluginResult *commandResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:message];
+        [self.commandDelegate sendPluginResult:commandResult callbackId:command.callbackId];
     }
-
-    NSMutableDictionary* message = [NSMutableDictionary dictionaryWithCapacity:1];
-    [message setObject:[NSNumber numberWithBool:enabled] forKey:@"isEnabled"];
-    CDVPluginResult *commandResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:message];
-    [self.commandDelegate sendPluginResult:commandResult callbackId:command.callbackId];
+ 
 }
 
 -(void)successWithMessage:(NSString *)callbackId withMsg:(NSString *)message

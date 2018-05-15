@@ -12,6 +12,7 @@
 
 static char launchNotificationKey;
 static char coldstartKey;
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
 
 @implementation AppDelegate (notification)
 
@@ -53,10 +54,16 @@ static char coldstartKey;
 
 - (AppDelegate *)pushPluginSwizzledInit
 {
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(createNotificationChecker:)
-                                                 name:UIApplicationDidFinishLaunchingNotification
-                                               object:nil];
+    if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"10.0")) {
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        center.delegate = self;
+    } else {
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(createNotificationChecker:)
+                                                     name:UIApplicationDidFinishLaunchingNotification
+                                                   object:nil];
+    }
+    
     [[NSNotificationCenter defaultCenter]addObserver:self
                                             selector:@selector(pushPluginOnApplicationDidBecomeActive:)
                                                 name:UIApplicationDidBecomeActiveNotification
@@ -179,6 +186,24 @@ static char coldstartKey;
     }
 }
 
+- (void)checkUserHasRemoteNotificationsEnabledWithCompletionHandler:(nonnull void (^)(BOOL))completionHandler
+{
+    [[UNUserNotificationCenter currentNotificationCenter] getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings * _Nonnull settings) {
+        
+        switch (settings.authorizationStatus)
+        {
+            case UNAuthorizationStatusDenied:
+            case UNAuthorizationStatusNotDetermined:
+                completionHandler(NO);
+                break;
+            case UNAuthorizationStatusAuthorized:
+                completionHandler(YES);
+                break;
+        }
+    }];
+}
+
+
 - (void)pushPluginOnApplicationDidBecomeActive:(NSNotification *)notification {
 
     NSLog(@"active");
@@ -201,6 +226,79 @@ static char coldstartKey;
         self.launchNotification = nil;
         self.coldstart = [NSNumber numberWithBool:NO];
         [pushHandler performSelectorOnMainThread:@selector(notificationReceived) withObject:pushHandler waitUntilDone:NO];
+    }
+}
+
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler
+{
+    NSLog( @"NotificationCenter Handle push from foreground" );
+    // custom code to handle push while app is in the foreground
+    PushPlugin *pushHandler = [self getCommandInstance:@"PushNotification"];
+    pushHandler.notificationMessage = notification.request.content.userInfo;
+    pushHandler.isInline = YES;
+    [pushHandler notificationReceived];
+    
+    completionHandler(UNNotificationPresentationOptionNone);
+}
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void(^)(void))completionHandler
+{
+    NSLog(@"Push Plugin didReceiveNotificationResponse: actionIdentifier %@, notification: %@", response.actionIdentifier,
+          response.notification.request.content.userInfo);
+    NSMutableDictionary *userInfo = [response.notification.request.content.userInfo mutableCopy];
+    [userInfo setObject:response.actionIdentifier forKey:@"actionCallback"];
+    NSLog(@"Push Plugin userInfo %@", userInfo);
+    
+    switch ([UIApplication sharedApplication].applicationState) {
+        case UIApplicationStateActive:
+        {
+            PushPlugin *pushHandler = [self getCommandInstance:@"PushNotification"];
+            pushHandler.notificationMessage = userInfo;
+            pushHandler.isInline = NO;
+            [pushHandler notificationReceived];
+            completionHandler();
+            break;
+        }
+        case UIApplicationStateInactive:
+        {
+            NSLog(@"coldstart");
+            self.launchNotification = response.notification.request.content.userInfo;
+            self.coldstart = [NSNumber numberWithBool:YES];
+            break;
+        }
+        case UIApplicationStateBackground:
+        {
+            void (^safeHandler)(void) = ^(void){
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    completionHandler();
+                });
+            };
+            
+            PushPlugin *pushHandler = [self getCommandInstance:@"PushNotification"];
+            
+            if (pushHandler.handlerObj == nil) {
+                pushHandler.handlerObj = [NSMutableDictionary dictionaryWithCapacity:2];
+            }
+            
+            id notId = [userInfo objectForKey:@"notId"];
+            if (notId != nil) {
+                NSLog(@"Push Plugin notId %@", notId);
+                [pushHandler.handlerObj setObject:safeHandler forKey:notId];
+            } else {
+                NSLog(@"Push Plugin notId handler");
+                [pushHandler.handlerObj setObject:safeHandler forKey:@"handler"];
+            }
+            
+            pushHandler.notificationMessage = userInfo;
+            pushHandler.isInline = NO;
+            
+            [pushHandler performSelectorOnMainThread:@selector(notificationReceived) withObject:pushHandler waitUntilDone:NO];
+        }
     }
 }
 
@@ -274,5 +372,7 @@ forRemoteNotification: (NSDictionary *) notification completionHandler: (void (^
     self.launchNotification = nil; // clear the association and release the object
     self.coldstart = nil;
 }
+
+
 
 @end

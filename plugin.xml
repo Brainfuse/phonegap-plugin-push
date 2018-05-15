@@ -100,8 +100,10 @@
     </config-file>
     <source-file src="src/ios/AppDelegate+notification.m"/>
     <source-file src="src/ios/PushPlugin.m"/>
+    <source-file src="src/ios/UNUserNotificationCenter+Delegates.m"/>
     <header-file src="src/ios/AppDelegate+notification.h"/>
     <header-file src="src/ios/PushPlugin.h"/>
+    <header-file src="src/ios/UNUserNotificationCenter+Delegates.h"/>  
     <framework src="AddressBook.framework"/>
     <framework src="libsqlite3.tbd"/>
     <framework src="libz.tbd"/>
